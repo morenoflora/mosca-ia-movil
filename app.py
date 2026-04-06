@@ -8,11 +8,12 @@ import folium
 from streamlit_folium import st_folium
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="Monitor Bio-IA V11", page_icon="🪰", layout="wide")
+st.set_page_config(page_title="Monitor Bio-IA V12", page_icon="🪰", layout="wide")
 
-st.title("🪰 Monitor de Dispersión y Previsión a 7 Días")
+st.title("🪰 Monitor de Dispersión y Previsión a 7 Días (V12)")
 st.markdown("""
-Analiza la **dispersión estival** y la **probabilidad de vuelo para la próxima semana** en cualquier punto del mapa.
+Analiza la **dispersión estival** y la **probabilidad de vuelo** en tiempo real. 
+*Actualizado para soportar acumulados de todo el año.*
 """)
 
 # --- CARREGA MODEL ---
@@ -36,7 +37,7 @@ folium.Marker(location=[st.session_state.lat, st.session_state.lon], icon=folium
 
 col_map, col_empty = st.columns([1.5, 1])
 with col_map:
-    output = st_folium(m, width=950, height=500, key="mapa_v11")
+    output = st_folium(m, width=950, height=500, key="mapa_v12")
 
 if output.get("last_clicked"):
     n_lat, n_lon = output["last_clicked"]["lat"], output["last_clicked"]["lng"]
@@ -45,64 +46,82 @@ if output.get("last_clicked"):
         st.session_state.zoom = output.get("zoom", 8)
         st.rerun()
 
-# --- SIDEBAR & ACCIÓN ---
+# ---SIDEBAR ---
 st.sidebar.header("🕹️ Centro de Control")
 st.sidebar.info(f"📍 Lat: {st.session_state.lat:.4f} | Lon: {st.session_state.lon:.4f}")
 
+# --- FUNCIÓN DE DESCARGA HÍBRIDA ---
+def get_weather_data(lat, lon):
+    hoy = datetime.date.today()
+    inicio_ano = datetime.date(hoy.year, 1, 1)
+    hace_2_dias = hoy - datetime.timedelta(days=2)
+    
+    # 1. Descargar Histórico (Desde el 1 de Enero hasta hace 2 días)
+    url_hist = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={inicio_ano}&end_date={hace_2_dias}&daily=temperature_2m_max,temperature_2m_mean&timezone=Europe/Madrid"
+    
+    # 2. Descargar Forecast (Desde hace 1 día hasta +7 días)
+    url_fore = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&past_days=1&forecast_days=7&daily=temperature_2m_max,temperature_2m_mean&timezone=Europe/Madrid"
+    
+    try:
+        r_hist = requests.get(url_hist).json()['daily']
+        r_fore = requests.get(url_fore).json()['daily']
+        
+        df_h = pd.DataFrame(r_hist)
+        df_f = pd.DataFrame(r_fore)
+        
+        # Combinar y quitar duplicados (por si se solapan)
+        df = pd.concat([df_h, df_f]).drop_duplicates(subset=['time']).reset_index(drop=True)
+        df['date'] = pd.to_datetime(df['time']).dt.date
+        return df
+    except Exception as e:
+        st.error(f"Error de conexión con satélites: {e}")
+        return None
+
 if st.sidebar.button("🚀 Lanzar Predicción a 7 Días", type="primary", use_container_width=True):
-    with st.spinner("Analizando ciclo biol\xf3gico..."):
-        # API Online
-        hoy = datetime.date.today()
-        url = f"https://api.open-meteo.com/v1/forecast?latitude={st.session_state.lat}&longitude={st.session_state.lon}&start_date={datetime.date(hoy.year,1,1)}&end_date={hoy + datetime.timedelta(days=7)}&daily=temperature_2m_max,temperature_2m_mean&timezone=Europe/Madrid"
-        try:
-            r = requests.get(url).json()['daily']
-            df = pd.DataFrame(r)
-            df['date'] = pd.to_datetime(df['time'])
+    with st.spinner("Analizando ciclo biológico y térmico..."):
+        df = get_weather_data(st.session_state.lat, st.session_state.lon)
+        
+        if df is not None:
+            hoy = datetime.date.today()
             df['deg_above_29'] = np.maximum(0, df['temperature_2m_max'] - 29)
             df['ADD29'] = df['deg_above_29'].cumsum()
             
-            # Datos 2026
-            add29 = df[df['date'].dt.date <= hoy]['ADD29'].iloc[-1]
-            tm7 = df[df['date'].dt.date <= hoy]['temperature_2m_mean'].tail(7).mean()
-            df_f = df[df['date'].dt.date > hoy]
-            fc_t, fc_add = df_f['temperature_2m_mean'].mean(), df_f['deg_above_29'].sum()
+            # Extraer métricas clave
+            current_row = df[df['date'] <= hoy].iloc[-1]
+            add29 = current_row['ADD29']
+            tm7 = df[df['date'] <= hoy]['temperature_2m_mean'].tail(7).mean()
             
-            # INFERENCIA Q1 (Vuelo a 7 das)
-            dist, is_disp = 19 - add29, 1 if add29 >= 19 else 0
+            df_future = df[df['date'] > hoy]
+            fcst_t = df_future['temperature_2m_mean'].mean()
+            fcst_add = df_future['deg_above_29'].sum()
+            
+            # Predicción IA
+            dist = 19 - add29
+            is_disp = 1 if add29 >= 19 else 0
             X = pd.DataFrame([{
                 'latitud': st.session_state.lat, 'longitud': st.session_state.lon, 'altura': 450.0,
                 'ADD29': add29, 'dist_to_19_gdd': dist, 'is_dispersed': is_disp,
-                'tmean_roll_7': tm7, 'fcst_7d_tmean': fc_t, 'fcst_7d_ADD29_inc': fc_add
+                'tmean_roll_7': tm7, 'fcst_7d_tmean': fcst_t, 'fcst_7d_ADD29_inc': fcst_add
             }])
             prob = modelo.predict_proba(X)[0][1]
             
+            # --- INTERFAZ ---
             st.divider()
             st.markdown(f"## 🔭 Informe de Riesgo (Periodo: +7 días)")
             
-            # Panel de previsin
-            c1, c2 = st.columns([1, 1])
+            c1, c2 = st.columns(2)
             with c1:
-                st.subheader("🎯 Probabilidad de Vuelo (Próx. 7d)")
-                st.metric("Vuelo en Trampas", f"{prob:.1%}")
-                if prob > 0.6:
-                    st.warning("⚠️ **ALERTA DE VUELO**: Alta probabilidad de capturas la semana que viene.")
-                else:
-                    st.success("Baja probabilidad de actividad en este punto.")
-                
+                st.subheader("🎯 Actividad Próxima Semana")
+                st.metric("Probabilidad de Vuelo", f"{prob:.1%}")
+                if prob > 0.6: st.warning("⚠️ Probabilidad ALTA")
             with c2:
-                st.subheader("🚶 Estado de Dispersión (19 GDD)")
-                st.metric("Acumulado Actual", f"{add29:.1f} GDD / 19")
+                st.subheader("🚶 Umbral Dispersión (19 GDD)")
+                st.metric("Acumulado", f"{add29:.1f} / 19")
                 st.progress(min(1.0, add29/19))
-                if add29 >= 19:
-                    st.error("🚨 DISPERSI\xD3N ACTIVA: La poblaci\xf3n busca refugio.")
             
             st.divider()
-            # Tendencia climtica
-            st.markdown("### 🌡️ Tendencia Térmica para la semana")
-            t1, t2, t3 = st.columns(3)
-            t1.write(f"Previsi\xf3n Media: **{fc_t:.1f}\xbaC**")
-            t2.write(f"Incremento Calor: **+{fc_add:.1f} GDD**")
-            t3.write(f"Distancia Umbral 19: **{max(0, 19-add29):.1f} GDD**")
+            st.subheader("📈 Evolución térmica")
+            st.line_chart(df[df['date'] <= hoy].set_index('date')['ADD29'])
             
-        except Exception as e:
-            st.error("Error al obtener el pron\xf3stico a 7 d\xedas.")
+        else:
+            st.error("No se pudieron obtener datos para esta ubicación.")
