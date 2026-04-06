@@ -65,14 +65,19 @@ def get_v20_data(lat, lon):
         df['deg_above_29'] = np.where(df['temperature_2m_mean'] > 29, df['deg_above_29_raw'], 0)
         
         df['ADD29'] = df['deg_above_29'].cumsum()
-        return df
-    except: return None
+        
+        # OBTENEMOS ALTITUD REAL DE LA API
+        elevacion = requests.get(url_f).json().get('elevation', 450.0)
+        
+        return df, elevacion
+    except: return None, 450.0
 
 if st.sidebar.button("🚀 Lanzar Análisis Completo", type="primary"):
-    with st.spinner("Analizando clima y biolog\xeda..."):
-        df = get_v20_data(st.session_state.lat, st.session_state.lon)
+    with st.spinner("Analizando clima y biología..."):
+        df, alt_real = get_v20_data(st.session_state.lat, st.session_state.lon)
         
         if df is not None:
+            st.sidebar.success(f"📏 Altitud detectada: {alt_real} m")
             hoy = datetime.date.today()
             actual = df[df['date'] <= hoy].iloc[-1]
             add29 = actual['ADD29']
@@ -85,7 +90,7 @@ if st.sidebar.button("🚀 Lanzar Análisis Completo", type="primary"):
             # IA
             d19, is_d = 19 - add29, 1 if add29 >= 19 else 0
             X = pd.DataFrame([{
-                'latitud': st.session_state.lat, 'longitud': st.session_state.lon, 'altura': 450.0,
+                'latitud': st.session_state.lat, 'longitud': st.session_state.lon, 'altura': float(alt_real),
                 'ADD29': add29, 'dist_to_19_gdd': d19, 'is_dispersed': is_d,
                 'tmean_roll_7': tm7_act, 'fcst_7d_tmean': fc_t_media, 'fcst_7d_ADD29_inc': fc_add
             }])
